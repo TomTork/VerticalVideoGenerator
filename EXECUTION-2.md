@@ -50,6 +50,7 @@ Useful overrides:
 --main-speed 1.10
 --main-exposure 0.18
 --main-audio-volume-percent 300
+--audio-peak-protection limiter
 --bottom-audio-volume 0.08
 --left-size 110
 --left-overflow 14
@@ -68,6 +69,21 @@ Useful overrides:
 --no-split
 --silence-noise -35dB
 --min-silence 0.35
+```
+
+For very high gain, the default limiter prevents digital clipping. This means
+that values such as `800` apply an 8x pre-gain, but the encoded signal cannot
+grow beyond the digital ceiling:
+
+```bash
+# Clean peak limiting, default.
+--main-audio-volume-percent 800 --audio-peak-protection limiter
+
+# Denser saturation instead of a conventional limiter.
+--main-audio-volume-percent 800 --audio-peak-protection softclip
+
+# Literal pre-gain with possible severe clipping and distortion.
+--main-audio-volume-percent 800 --audio-peak-protection off
 ```
 
 For a quick layout check without Whisper:

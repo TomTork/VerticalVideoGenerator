@@ -130,6 +130,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=100.0,
         help="Main audio volume in percent: 100 is unchanged, 300 is 3x louder.",
     )
+    parser.add_argument(
+        "--audio-peak-protection",
+        choices=("limiter", "softclip", "off"),
+        default="limiter",
+        help=(
+            "Peak handling after gain and mixing. limiter is cleanest, softclip "
+            "sounds denser, off preserves literal gain but may clip badly."
+        ),
+    )
     parser.add_argument("--audio-bitrate", default="192k")
 
     parser.add_argument(
@@ -359,6 +368,16 @@ def atempo_chain(speed: float) -> str:
         remaining /= 0.5
     factors.append(remaining)
     return ",".join(f"atempo={factor:.8f}" for factor in factors)
+
+
+def audio_peak_protection_filter(mode: str) -> str | None:
+    if mode == "limiter":
+        return "alimiter=limit=0.95"
+    if mode == "softclip":
+        return "asoftclip=type=cubic:threshold=0.95:output=0.95:oversample=4"
+    if mode == "off":
+        return None
+    raise CliError(f"Unsupported --audio-peak-protection mode: {mode}")
 
 
 def nested_time_expression(values: Sequence[int], interval: float) -> str:
@@ -731,21 +750,25 @@ def build_filter_graph(
         f"atrim=duration={duration:.6f},asetpts=PTS-STARTPTS[amain]"
     )
     filters.append(main_audio)
+    protection = audio_peak_protection_filter(args.audio_peak_protection)
     if bottom_has_audio and args.bottom_audio_volume > 0:
+        mixed_filters = [
+            "[amain][abottom]amix=inputs=2:duration=first:dropout_transition=0:"
+            "normalize=0"
+        ]
+        if protection:
+            mixed_filters.append(protection)
         filters.extend(
             [
                 (
                     f"[1:a:0]volume={args.bottom_audio_volume:.6f},"
                     f"atrim=duration={duration:.6f},asetpts=PTS-STARTPTS[abottom]"
                 ),
-                (
-                    "[amain][abottom]amix=inputs=2:duration=first:dropout_transition=0:"
-                    "normalize=0,alimiter=limit=0.95[aout]"
-                ),
+                f"{','.join(mixed_filters)}[aout]",
             ]
         )
     else:
-        filters.append("[amain]alimiter=limit=0.95[aout]")
+        filters.append(f"[amain]{protection or 'anull'}[aout]")
     return ";".join(filters)
 
 
@@ -1072,6 +1095,20 @@ def run_pipeline(args: argparse.Namespace) -> int:
             f"Layout: {width}x{height}, main={main_height}px ({args.main_ratio:.0%}), "
             f"bottom={bottom_height}px, duration={duration:.3f}s, fps={fps:.3f}"
         )
+        gain = args.main_audio_volume_percent / 100.0
+        gain_db = -math.inf if gain == 0 else 20.0 * math.log10(gain)
+        gain_db_text = "-inf" if not math.isfinite(gain_db) else f"{gain_db:+.2f}"
+        print(
+            f"Audio: main={args.main_audio_volume_percent:g}% ({gain:.3f}x, "
+            f"{gain_db_text} dB), bottom={args.bottom_audio_volume * 100:g}%, "
+            f"peak protection={args.audio_peak_protection}"
+        )
+        if gain > 1.0 and args.audio_peak_protection != "off":
+            print(
+                "Note: once peaks reach 0 dBFS, peak protection prevents further "
+                "linear output growth. Use --audio-peak-protection off only if "
+                "intentional clipping is acceptable."
+            )
         render(
             args,
             ffmpeg=ffmpeg,
@@ -1133,6 +1170,9 @@ def run_self_test() -> int:
         build_parser().parse_args(["--main-audio-volume-percent", "300"]).main_audio_volume_percent
         == 300.0
     )
+    assert audio_peak_protection_filter("limiter") == "alimiter=limit=0.95"
+    assert "asoftclip=" in (audio_peak_protection_filter("softclip") or "")
+    assert audio_peak_protection_filter("off") is None
     width_test_words = [
         TimedWord("оченьдлинное", 0.0, 0.2),
         TimedWord("предложение", 0.3, 0.5),
