@@ -22,6 +22,7 @@ Concrete example using the existing `02/cat` files:
   --main-ratio 0.60 \
   --main-speed 1.20 \
   --main-exposure 0.12 \
+  --main-audio-volume-percent 100 \
   --bottom-audio-volume 0.05 \
   --left-size 90 \
   --left-overflow 10 \
@@ -48,6 +49,7 @@ Useful overrides:
 --main-ratio 0.65
 --main-speed 1.10
 --main-exposure 0.18
+--main-audio-volume-percent 300
 --bottom-audio-volume 0.08
 --left-size 110
 --left-overflow 14
@@ -60,6 +62,7 @@ Useful overrides:
 --top-jump-seed 123
 --subtitle-words 5
 --subtitle-scale 140
+--subtitle-side-margin 80
 --subtitle-y-offset -10
 --max-part-duration 60
 --no-split

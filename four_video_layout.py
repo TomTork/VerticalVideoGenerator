@@ -122,6 +122,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.05,
         help="Linear bottom-audio volume relative to the main audio.",
     )
+    parser.add_argument(
+        "--main-audio-volume-percent",
+        "--main-audio-volume",
+        dest="main_audio_volume_percent",
+        type=float,
+        default=100.0,
+        help="Main audio volume in percent: 100 is unchanged, 300 is 3x louder.",
+    )
     parser.add_argument("--audio-bitrate", default="192k")
 
     parser.add_argument(
@@ -143,6 +151,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--subtitle-font", default="Arial")
     parser.add_argument("--subtitle-font-size", type=int)
     parser.add_argument("--subtitle-scale", type=int, default=132)
+    parser.add_argument(
+        "--subtitle-side-margin",
+        type=int,
+        default=80,
+        help=(
+            "Minimum left/right subtitle margin in pixels. Line length is "
+            "calculated for the final state where every word is enlarged."
+        ),
+    )
     parser.add_argument(
         "--subtitle-y-offset",
         type=int,
@@ -306,10 +323,16 @@ def validate_args(args: argparse.Namespace) -> None:
         raise CliError("--top-random-offset cannot be negative.")
     if not 0.0 <= args.bottom_audio_volume <= 1.0:
         raise CliError("--bottom-audio-volume must be between 0 and 1.")
+    if not 0.0 <= args.main_audio_volume_percent <= 1000.0:
+        raise CliError("--main-audio-volume-percent must be between 0 and 1000.")
     if args.subtitle_words <= 0:
         raise CliError("--subtitle-words must be greater than zero.")
     if not 100 <= args.subtitle_scale <= 250:
         raise CliError("--subtitle-scale must be between 100 and 250.")
+    if args.subtitle_side_margin < 0:
+        raise CliError("--subtitle-side-margin cannot be negative.")
+    if args.subtitle_side_margin * 2 >= args.width:
+        raise CliError("--subtitle-side-margin leaves no usable subtitle width.")
     if args.duration is not None and args.duration <= 0:
         raise CliError("--duration must be greater than zero.")
     if args.max_part_duration <= 0:
@@ -490,10 +513,45 @@ def ass_escape(text: str) -> str:
     )
 
 
-def group_words(words: Sequence[TimedWord], maximum: int) -> list[list[TimedWord]]:
+def estimated_text_width(text: str, font_size: int) -> float:
+    """Estimate bold Arial-like glyph width without adding a runtime dependency."""
+
+    narrow = set(".,:;!|`'ijlIтгГ()-")
+    wide = set("MW@#%ЖШЩЮФЫМД")
+    width_units = 0.0
+    for character in text:
+        if character.isspace():
+            width_units += 0.32
+        elif character in narrow:
+            width_units += 0.32
+        elif character in wide:
+            width_units += 0.82
+        elif character.isupper():
+            width_units += 0.66
+        elif character.isdigit():
+            width_units += 0.56
+        else:
+            width_units += 0.58
+    return width_units * font_size
+
+
+def group_words(
+    words: Sequence[TimedWord],
+    maximum: int,
+    *,
+    maximum_width: float,
+    font_size: int,
+    scale: int,
+) -> list[list[TimedWord]]:
     groups: list[list[TimedWord]] = []
     current: list[TimedWord] = []
     for word in words:
+        candidate = [*current, word]
+        candidate_text = " ".join(item.text for item in candidate)
+        final_width = estimated_text_width(candidate_text, font_size) * scale / 100.0
+        if current and (len(current) >= maximum or final_width > maximum_width):
+            groups.append(current)
+            current = []
         current.append(word)
         if len(current) >= maximum or re.search(r"[.!?…]$", word.text):
             groups.append(current)
@@ -535,6 +593,7 @@ def write_animated_ass(
     font_size: int | None,
     maximum_words: int,
     scale: int,
+    side_margin: int,
 ) -> Path:
     size = font_size or max(42, round(height * 0.034))
     outline = max(4, round(size * 0.09))
@@ -558,7 +617,8 @@ def write_animated_ass(
     for index, color in enumerate(DEFAULT_COLORS):
         lines.append(
             f"Style: Color{index},{font},{size},{color},{color},&H00000000,"
-            f"&H00000000,1,0,0,0,100,100,0,0,1,{outline},2,5,40,40,0,1"
+            f"&H00000000,1,0,0,0,100,100,0,0,1,{outline},2,5,"
+            f"{side_margin},{side_margin},0,1"
         )
     lines.extend(
         [
@@ -568,7 +628,13 @@ def write_animated_ass(
         ]
     )
 
-    groups = group_words(words, maximum_words)
+    groups = group_words(
+        words,
+        maximum_words,
+        maximum_width=width - side_margin * 2 - outline * 2,
+        font_size=size,
+        scale=scale,
+    )
     for index, group in enumerate(groups):
         style_name = f"Color{index % len(DEFAULT_COLORS)}"
         cue_start = max(0.0, group[0].start)
@@ -661,6 +727,7 @@ def build_filter_graph(
 
     main_audio = (
         f"[0:a:0]{atempo_chain(args.main_speed)},"
+        f"volume={args.main_audio_volume_percent / 100.0:.6f},"
         f"atrim=duration={duration:.6f},asetpts=PTS-STARTPTS[amain]"
     )
     filters.append(main_audio)
@@ -678,7 +745,7 @@ def build_filter_graph(
             ]
         )
     else:
-        filters.append("[amain]anull[aout]")
+        filters.append("[amain]alimiter=limit=0.95[aout]")
     return ";".join(filters)
 
 
@@ -987,6 +1054,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
                 font_size=args.subtitle_font_size,
                 maximum_words=args.subtitle_words,
                 scale=args.subtitle_scale,
+                side_margin=args.subtitle_side_margin,
             )
             print(f"Subtitle words: {len(output_words)}")
 
@@ -1059,6 +1127,30 @@ def run_self_test() -> int:
     assert choose_split_point(100.0, split_silences) == 49.5
     assert choose_split_point(100.0, []) == 50.0
     assert build_parser().parse_args([]).left_y_offset == 70
+    assert build_parser().parse_args([]).subtitle_side_margin == 80
+    assert build_parser().parse_args([]).main_audio_volume_percent == 100.0
+    assert (
+        build_parser().parse_args(["--main-audio-volume-percent", "300"]).main_audio_volume_percent
+        == 300.0
+    )
+    width_test_words = [
+        TimedWord("оченьдлинное", 0.0, 0.2),
+        TimedWord("предложение", 0.3, 0.5),
+        TimedWord("дальше", 0.6, 0.9),
+    ]
+    width_groups = group_words(
+        width_test_words,
+        10,
+        maximum_width=900,
+        font_size=64,
+        scale=132,
+    )
+    assert len(width_groups) == 2
+    assert [word.text for word in width_groups[0]] == ["оченьдлинное"]
+    assert all(
+        estimated_text_width(" ".join(word.text for word in group), 64) * 1.32 <= 900
+        for group in width_groups
+    )
     aligned = align_transcript_words(
         "один два три",
         [
@@ -1079,6 +1171,7 @@ def run_self_test() -> int:
             font_size=64,
             maximum_words=4,
             scale=132,
+            side_margin=80,
         )
         contents = path.read_text(encoding="utf-8")
         assert "\\pos(540,1152)" in contents
