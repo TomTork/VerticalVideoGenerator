@@ -5,7 +5,7 @@ The renderer accepts four videos in this order:
 1. Main video: top 60% by default, stretched to the area without cropping.
 2. Bottom video: bottom 40%, stretched to the area without cropping.
 3. Left video: 90x90 by default, centered on the 60/40 junction and shifted
-   10 pixels beyond the left edge.
+   70 pixels downward, and 10 pixels beyond the left edge.
 4. Top video: 64x64 by default. It alternates between the top-right and
    top-left corners every 5 seconds, with deterministic random offsets.
 
@@ -51,7 +51,7 @@ Useful overrides:
 --bottom-audio-volume 0.08
 --left-size 110
 --left-overflow 14
---left-y-offset -20
+--left-y-offset 70
 --top-size 72
 --top-margin 20
 --top-horizontal-margin 24

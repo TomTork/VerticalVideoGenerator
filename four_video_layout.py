@@ -105,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--left-y-offset",
         type=int,
-        default=0,
+        default=70,
         help="Vertical offset from a position centered on the main/bottom junction.",
     )
 
@@ -513,12 +513,11 @@ def animated_ass_text(
     parts: list[str] = []
     for word in words:
         start_ms = max(0, round((word.start - cue_start) * 1000))
-        end_ms = max(start_ms + 80, round((word.end - cue_start) * 1000))
-        midpoint = max(start_ms + 40, round((start_ms + end_ms) / 2))
+        word_end_ms = max(start_ms + 80, round((word.end - cue_start) * 1000))
+        midpoint = max(start_ms + 40, round((start_ms + word_end_ms) / 2))
         parts.append(
             rf"{{\fscx100\fscy100"
-            rf"\t({start_ms},{midpoint},1,\fscx{scale}\fscy{scale})"
-            rf"\t({midpoint},{end_ms},1,\fscx100\fscy100)}}"
+            rf"\t({start_ms},{midpoint},1,\fscx{scale}\fscy{scale})}}"
             f"{ass_escape(word.text)}"
             rf"{{\r{style_name}}}"
         )
@@ -573,7 +572,7 @@ def write_animated_ass(
     for index, group in enumerate(groups):
         style_name = f"Color{index % len(DEFAULT_COLORS)}"
         cue_start = max(0.0, group[0].start)
-        cue_end = group[-1].end + 0.18
+        cue_end = group[-1].end + 0.68
         if index + 1 < len(groups):
             cue_end = min(cue_end, groups[index + 1][0].start)
         text = animated_ass_text(
@@ -1059,6 +1058,7 @@ def run_self_test() -> int:
     ]
     assert choose_split_point(100.0, split_silences) == 49.5
     assert choose_split_point(100.0, []) == 50.0
+    assert build_parser().parse_args([]).left_y_offset == 70
     aligned = align_transcript_words(
         "один два три",
         [
@@ -1083,6 +1083,8 @@ def run_self_test() -> int:
         contents = path.read_text(encoding="utf-8")
         assert "\\pos(540,1152)" in contents
         assert "\\t(" in contents
+        assert f"\\fscx{132}\\fscy{132})\\t(" not in contents
+        assert "0:00:01.58" in contents
         assert "Style: Color7" in contents
     print("Self-test passed.")
     return 0
