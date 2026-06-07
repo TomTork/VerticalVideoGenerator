@@ -51,6 +51,20 @@ class TimedWord:
     end: float
 
 
+@dataclass(frozen=True)
+class Silence:
+    start: float
+    end: float
+
+    @property
+    def duration(self) -> float:
+        return max(0.0, self.end - self.start)
+
+    @property
+    def midpoint(self) -> float:
+        return self.start + self.duration / 2.0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -149,6 +163,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--video-bitrate", default="12M")
     parser.add_argument("--crf", type=int, default=18)
     parser.add_argument("--preset", default="medium")
+    parser.add_argument(
+        "--max-part-duration",
+        type=float,
+        default=60.0,
+        help="Split results longer than this at a pause near the middle.",
+    )
+    parser.add_argument(
+        "--no-split",
+        action="store_true",
+        help="Do not create the automatic part1/part2 files.",
+    )
+    parser.add_argument("--silence-noise", default="-35dB")
+    parser.add_argument("--min-silence", type=float, default=0.35)
     parser.add_argument("--duration", type=float)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--keep-temp", action="store_true")
@@ -285,6 +312,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise CliError("--subtitle-scale must be between 100 and 250.")
     if args.duration is not None and args.duration <= 0:
         raise CliError("--duration must be greater than zero.")
+    if args.max_part_duration <= 0:
+        raise CliError("--max-part-duration must be greater than zero.")
+    if args.min_silence <= 0:
+        raise CliError("--min-silence must be greater than zero.")
 
 
 def resolve_input(path: Path, label: str) -> Path:
@@ -668,6 +699,21 @@ def choose_encoder(args: argparse.Namespace, ffmpeg: str) -> str:
     return "libx264"
 
 
+def video_encoder_args(args: argparse.Namespace, ffmpeg: str) -> list[str]:
+    if choose_encoder(args, ffmpeg) == "videotoolbox":
+        return [
+            "-c:v",
+            "h264_videotoolbox",
+            "-b:v",
+            args.video_bitrate,
+            "-maxrate",
+            args.video_bitrate,
+            "-allow_sw",
+            "1",
+        ]
+    return ["-c:v", "libx264", "-preset", args.preset, "-crf", str(args.crf)]
+
+
 def render(
     args: argparse.Namespace,
     *,
@@ -693,24 +739,7 @@ def render(
             f"{duration:.6f}",
         ]
     )
-    encoder = choose_encoder(args, ffmpeg)
-    if encoder == "videotoolbox":
-        command.extend(
-            [
-                "-c:v",
-                "h264_videotoolbox",
-                "-b:v",
-                args.video_bitrate,
-                "-maxrate",
-                args.video_bitrate,
-                "-allow_sw",
-                "1",
-            ]
-        )
-    else:
-        command.extend(
-            ["-c:v", "libx264", "-preset", args.preset, "-crf", str(args.crf)]
-        )
+    command.extend(video_encoder_args(args, ffmpeg))
     command.extend(
         [
             "-pix_fmt",
@@ -729,6 +758,156 @@ def render(
     )
     run_cmd(command, dry_run=args.dry_run)
     print(f"Done: {output}")
+
+
+def detect_main_silences(
+    main_video: Path,
+    *,
+    ffmpeg: str,
+    duration: float,
+    speed: float,
+    noise: str,
+    min_silence: float,
+    dry_run: bool,
+) -> list[Silence]:
+    result = run_cmd(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-nostats",
+            "-i",
+            str(main_video),
+            "-vn",
+            "-af",
+            (
+                f"{atempo_chain(speed)},atrim=duration={duration:.6f},"
+                f"silencedetect=noise={noise}:d={min_silence}"
+            ),
+            "-f",
+            "null",
+            "-",
+        ],
+        capture=True,
+        dry_run=dry_run,
+    )
+    if dry_run:
+        return []
+
+    text = (result.stderr or "") + "\n" + (result.stdout or "")
+    starts: list[float] = []
+    silences: list[Silence] = []
+    start_pattern = re.compile(r"silence_start:\s*([0-9.]+)")
+    end_pattern = re.compile(
+        r"silence_end:\s*([0-9.]+)\s*\|\s*silence_duration:\s*([0-9.]+)"
+    )
+    for line in text.splitlines():
+        start_match = start_pattern.search(line)
+        if start_match:
+            starts.append(float(start_match.group(1)))
+            continue
+        end_match = end_pattern.search(line)
+        if end_match and starts:
+            start = starts.pop(0)
+            end = min(duration, float(end_match.group(1)))
+            if end > start:
+                silences.append(Silence(start, end))
+    for start in starts:
+        if duration > start:
+            silences.append(Silence(start, duration))
+    return sorted(silences, key=lambda item: item.start)
+
+
+def choose_split_point(duration: float, silences: Sequence[Silence]) -> float:
+    target = duration / 2.0
+    middle = [
+        silence
+        for silence in silences
+        if duration * 0.35 <= silence.midpoint <= duration * 0.65
+    ]
+    if not middle:
+        middle = [
+            silence
+            for silence in silences
+            if duration * 0.25 <= silence.midpoint <= duration * 0.75
+        ]
+    if not middle:
+        return target
+
+    best = max(
+        middle,
+        key=lambda silence: (silence.duration, -abs(silence.midpoint - target)),
+    )
+    return min(max(best.midpoint, 1.0), duration - 1.0)
+
+
+def split_output(
+    args: argparse.Namespace,
+    *,
+    ffmpeg: str,
+    output: Path,
+    main_video: Path,
+    duration: float,
+) -> tuple[Path, Path] | None:
+    if args.no_split or duration <= args.max_part_duration:
+        return None
+
+    silences = detect_main_silences(
+        main_video,
+        ffmpeg=ffmpeg,
+        duration=duration,
+        speed=args.main_speed,
+        noise=args.silence_noise,
+        min_silence=args.min_silence,
+        dry_run=args.dry_run,
+    )
+    split_at = choose_split_point(duration, silences)
+    part1 = output.with_name(f"{output.stem}_part1{output.suffix}")
+    part2 = output.with_name(f"{output.stem}_part2{output.suffix}")
+    common_output_args = [
+        *video_encoder_args(args, ffmpeg),
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        args.audio_bitrate,
+        "-movflags",
+        "+faststart",
+    ]
+
+    run_cmd(
+        [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-i",
+            str(output),
+            "-t",
+            f"{split_at:.6f}",
+            *common_output_args,
+            str(part1),
+        ],
+        dry_run=args.dry_run,
+    )
+    run_cmd(
+        [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-i",
+            str(output),
+            "-ss",
+            f"{split_at:.6f}",
+            *common_output_args,
+            str(part2),
+        ],
+        dry_run=args.dry_run,
+    )
+    print(
+        f"Split at {split_at:.3f}s using {len(silences)} detected pauses: "
+        f"{part1.name}, {part2.name}"
+    )
+    return part1, part2
 
 
 def run_pipeline(args: argparse.Namespace) -> int:
@@ -833,6 +1012,13 @@ def run_pipeline(args: argparse.Namespace) -> int:
             filter_graph=filter_graph,
             duration=duration,
         )
+        split_output(
+            args,
+            ffmpeg=ffmpeg,
+            output=output,
+            main_video=inputs[0],
+            duration=duration,
+        )
 
         if args.keep_subtitles and subtitle_file is not None and not args.dry_run:
             sidecar = output.with_suffix(".ass")
@@ -866,6 +1052,13 @@ def run_self_test() -> int:
     assert all(y <= 18 for y in y_values)
     expression = nested_time_expression([100, 200, 300], 5)
     assert "lt(t\\,5.000)" in expression and expression.endswith("))")
+    split_silences = [
+        Silence(35.0, 36.0),
+        Silence(48.0, 51.0),
+        Silence(62.0, 63.0),
+    ]
+    assert choose_split_point(100.0, split_silences) == 49.5
+    assert choose_split_point(100.0, []) == 50.0
     aligned = align_transcript_words(
         "один два три",
         [

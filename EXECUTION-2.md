@@ -37,6 +37,11 @@ Concrete example using the existing `02/cat` files:
 main audio is used at full level. Bottom audio is mixed at 5% by default;
 left and top audio tracks are ignored.
 
+The bottom, left, and top inputs are looped automatically when they are
+shorter than the accelerated main video. Results longer than 60 seconds are
+also split into `_part1` and `_part2`. The split point is selected from pauses
+near the middle using the same rules as `main.py`.
+
 Useful overrides:
 
 ```bash
@@ -56,6 +61,10 @@ Useful overrides:
 --subtitle-words 5
 --subtitle-scale 140
 --subtitle-y-offset -10
+--max-part-duration 60
+--no-split
+--silence-noise -35dB
+--min-silence 0.35
 ```
 
 For a quick layout check without Whisper:
