@@ -47,6 +47,7 @@ Useful overrides:
 
 ```bash
 --main-ratio 0.65
+--swap-main-bottom
 --main-speed 1.10
 --main-exposure 0.18
 --main-audio-volume-percent 300
@@ -70,6 +71,14 @@ Useful overrides:
 --silence-noise -35dB
 --min-silence 0.35
 ```
+
+`--bottom-audio-volume` is a linear multiplier: `0.05` means 5%, `1.0`
+means 100%, and `2.05` means 205%. Values from 0 through 10 are accepted.
+
+`--swap-main-bottom` moves the main-ratio video to the lower part of the
+frame and the secondary video to the upper part. The main video keeps its
+configured share, duration, speed, exposure, subtitles, and primary audio.
+The subtitle junction and left overlay follow the moved boundary.
 
 For very high gain, the default limiter prevents digital clipping. This means
 that values such as `800` apply an 8x pre-gain, but the encoded signal cannot
